@@ -7,6 +7,7 @@ use Cwd qw(abs_path);
 use File::Which;
 use File::Temp qw(tempdir);
 use Term::ANSIColor;
+use List::Util qw(min max);
 
 #......................................
 my $VERSION = "0.0.2";
@@ -14,9 +15,9 @@ my $EXE = basename($0);
 my $MAPCALLER = "MapCaller -maxmm 0.02 -alg ksw2 -ploidy 1 -min_cnv 10000000 -min_gap 10000000";
 
 #......................................
-my %opt = (d=>10, n=>3, j=>0);
+my %opt = (d=>10, n=>3, j=>0, s=>1);
 @ARGV or usage(1);
-getopts('hVf:r:i:o:d:r:j:', \%opt);
+getopts('hVf:r:i:o:d:n:j:s:', \%opt);
 $opt{h} and usage(0);
 $opt{V} and version();
 my $R1 = check_file($opt{f}, '-f R1.fq');
@@ -25,11 +26,13 @@ my $IN = check_file($opt{i}, '-i IN.fa');
 my $CPUS = check_int($opt{j} || cpus(), 1, undef, '-j');
 my $MAXITER = check_int($opt{n}, 1, 100, '-n');
 my $MINDP = check_int($opt{d}, 1, undef, '-m');
+my $SAMP = $opt{'s'} || 1.0;
+$SAMP > 0 && $SAMP <= 1 or err("-s $SAMP must be (0..1])");
 
 #......................................
 msg("This is $EXE $VERSION");
-#check_tools(qw'pilon bcftools samtools minimap2');
-check_tools(qw'seqkit MapCaller bcftools');
+check_tools(qw'pilon minimap2 samtools');
+
 #my $dir = tempdir();
 my $dir = './out'; run("mkdir -p $dir");
 msg("Work folder:", $dir);
@@ -37,20 +40,39 @@ msg("Work folder:", $dir);
 my $fa = fasta2hash($IN);
 hash2fasta("$dir/in.fa", $fa);
 
-for (my $iter=1; $iter <= $MAXITER; $iter++) {
-  for my $rot (0, 1) {
-    my $round = "$iter.$rot";
-    banner("Correction round $round");
-    my $vcf = "$dir/$round.vcf";
-    run("$MAPCALLER -r '$IN' -f '$R1' -f2 '$R2'"
-       ." -t $CPUS -ad $MINDP"
-       ." -vcf $vcf -log $vcf.log 1> $vcf.out 2> $vcf.err");
-    run("bcftools convert -Oz $vcf > $vcf.gz");
-    run("bcftools index $vcf.gz");
-  }
+for my $round (1 .. $MAXITER) {
+  banner("Correction round $round");
+  my $bam = "$dir/$round.bam";
+  bam("$dir/in.fa", $R1, $R2, $bam);
+  pilon("$dir/in.fa", $bam, "$dir/$round.fa");   
 }
 
 msg("Done.");
+
+#......................................
+sub bam {
+  my($ref, $r1, $r2, $bam) = @_;
+  run("samtools faidx '$ref'");
+  run("minimap2 -a -x sr -t $CPUS '$ref' '$r1' '$r2'" 
+     ." | samtools view -u -f 2 -"
+     ." | samtools sort -@ $CPUS"
+     ." > '$bam'");
+  run("samtools index '$bam'");
+  return;
+}
+
+#......................................
+sub pilon {
+  my($old, $bam, $new) = @_;
+  run(
+    "_JAVA_OPTS=-Xmx8g pilon --threads $CPUS"
+   ." --genome '$old' --frags '$bam'"
+   ." --output '$new' --changes --fix bases"
+   ." --minqual 13 --minmq 30 --mindepth $MINDP"
+   ." --nostrays" 
+  );
+  return;
+}
 
 #......................................
 sub version {
@@ -75,6 +97,7 @@ sub usage {
     "  -o FASTA  Output corrected contigs\n",
     "  -d INT    Minimum depth [$opt{d}]\n",
     "  -n INT    Maximum correction rounds [$opt{n}]\n",
+    "  -s FLOAT  Subsample reads for speed [$opt{s}]\n",
     "  -j CPUS   NUmber of threads [$opt{j}]\n",
     "END\n";
   print 
@@ -91,7 +114,7 @@ sub err {
 }
 #......................................
 sub run {
-  msg("Running:", @_);
+  msg("Running:", color('blue'), @_, color('reset'));
   system(@_)==0 or 
     err("$! | could not run:", @_);
 }
@@ -163,6 +186,9 @@ sub fasta2hash {
     }
   }
   close $FASTA;
+  for my $id (keys %seq) {
+    $seq{$id} =~ s/[^AGTC]/N/gi;
+  }
   my $N = scalar keys %seq;
   msg("Loaded $N contigs totalling $bp bp");
   return \%seq;
@@ -186,4 +212,11 @@ sub hash2fasta {
 
 #......................................
 
-
+__DATA__
+#    run("$MAPCALLER -r $dir/in.fa -f '$R1' -f2 '$R2'"
+#       ." -t $CPUS -ad $MINDP"
+#       ." -vcf $vcf -log $vcf.log 1> $vcf.out 2> $vcf.err");
+#    run(qq,bcftools filter -Oz -i 'FILTER="PASS"' $vcf > $vcf.gz,);
+    #run("bcftools convert -Oz $vcf > $vcf.gz");
+#    run("bcftools index $vcf.gz");
+#    run("bcftools consensus -f $dir/in.fa $vcf.gz > $dir/out.fa");
