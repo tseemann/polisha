@@ -1,0 +1,114 @@
+#!/usr/bin/env perl
+use v5.26;
+use strict;
+use File::Basename;
+use Getopt::Std;
+use Cwd qw(abs_path);
+use File::Which;
+use File::Temp qw(tempdir);
+
+#......................................
+my $VERSION = "0.0.1";
+my $EXE = basename($0);
+my $MAPCALLER = "MapCaller -maxmm 0.02 -alg ksw2 -ploidy 1";
+
+#......................................
+my %opt = (d=>10, r=>3, j=>0);
+@ARGV or usage(1);
+getopts('hVf:r:i:o:d:r:j:', \%opt);
+$opt{h} and usage(0);
+$opt{V} and version();
+my $R1 = check_file($opt{f}, '-f R1.fq');
+my $R2 = check_file($opt{r}, '-r R2.fq');
+my $IN = check_file($opt{i}, '-i IN.fa');
+my $CPUS = check_int($opt{j} || cpus(), 1, undef, '-j CPU');
+my $MAXITER = check_int($opt{r}, 1, 100, '-r ROUNDS');
+my $MINDP = check_int($opt{d}, 1, undef, '-m DEPTH');
+
+#......................................
+msg("This is $EXE $VERSION");
+#check_tools(qw'pilon bcftools samtools minimap2');
+check_tools(qw'seqkit MapCaller bcftools');
+my $dir = tempdir();
+msg("Work folder:", $dir);
+
+#run("$MAPCALLER -r '$IN' -f '$R1' -f2 '$R2' -t $CPUS -ad $MINDP");
+
+msg("Done.");
+
+
+#......................................
+sub version {
+  print "$EXE $VERSION\n";
+  exit(0);
+}
+#......................................
+sub usage {
+  my($ec) = 0;
+  select $ec ? \*STDERR : \*STDOUT;
+  print 
+    "SYNOPSIS\n",
+    "  Correct assembly errors with Illumina reads\n",
+    "USAGE\n",
+    "  $EXE [options] -f R1.fq -r R2.fq -i contigs.fa -o fixed.fa\n",
+    "OPTIONS\n",
+    "  -h        Print this help\n",
+    "  -V        Print version and exit\n",
+    "  -f FASTQ  R1 FASTQ reads\n",
+    "  -r FASTQ  R2 FASTQ reads\n",
+    "  -i FASTA  Input contigs\n",
+    "  -o FASTA  Output corrected contigs\n",
+    "  -d INT    Minimum depth [$opt{d}]\n",
+    "  -r INT    Maximum correction rounds [$opt{r}]\n",
+    "  -j CPUS   NUmber of threads [$opt{j}]\n",
+    "END\n";
+  print 
+  exit($ec);
+}
+#......................................
+sub msg {
+  print STDERR "@_\n";
+}
+#......................................
+sub err {
+  msg("ERROR:", @_);
+  exit(-1);
+}
+#......................................
+sub run {
+  msg("Running:", @_);
+  system(@_)==0 or 
+    err("Could not run:", @_);
+}
+#......................................
+sub check_tools {
+  for my $exe (@_) {
+    my $path = which($exe);
+    $path 
+      ? msg("Found $exe - $path")
+      : err("Could not find $exe - plase install it")
+      ;    
+  }
+}
+#......................................
+sub check_file {
+  my($fn, $msg) = @_;
+  $msg ||= 'file';
+  $fn or err("Please provide $msg");
+  -r $fn or err("Can't read $msg '$fn'");
+  return abs_path($fn);
+}
+#......................................
+sub check_int {
+  my($x, $min, $max, $msg) = @_;
+  defiined($x) or err("$msg has no value");
+  $x =~ m/^-?\d+$/ or err("$msg 'x' is not an integer");
+  err("$msg $x must be >= $min")
+    if defined($min) && $x < $min;
+  err("$msg $x must be <= $max")
+    if defined($max) && $x > $min;
+  return $x;  
+}
+
+#......................................
+
