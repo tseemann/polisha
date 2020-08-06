@@ -8,54 +8,99 @@ use File::Which;
 use File::Temp qw(tempdir);
 use Term::ANSIColor;
 use List::Util qw(min max);
+use File::Copy;
 
 #......................................
-my $VERSION = "0.0.2";
+my $VERSION = "0.1.0";
 my $EXE = basename($0);
 my $MAPCALLER = "MapCaller -maxmm 0.02 -alg ksw2 -ploidy 1 -min_cnv 10000000 -min_gap 10000000";
 
 #......................................
-my %opt = (d=>10, n=>3, j=>0, s=>1);
+my %opt = (d=>10, n=>4, j=>0, 'q'=>13, Q=>60);
 @ARGV or usage(1);
-getopts('hVf:r:i:o:d:n:j:s:', \%opt);
+getopts('hVkf:r:l:i:p:d:n:j:q:Q:', \%opt);
 $opt{h} and usage(0);
 $opt{V} and version();
 my $R1 = check_file($opt{f}, '-f R1.fq');
 my $R2 = check_file($opt{r}, '-r R2.fq');
 my $IN = check_file($opt{i}, '-i IN.fa');
+my $ONT = $opt{l} ? check_file($opt{l}, "-l ONT.fq") : '';
 my $CPUS = check_int($opt{j} || cpus(), 1, undef, '-j');
-my $MAXITER = check_int($opt{n}, 1, 100, '-n');
+my $ITER = check_int($opt{n}, 2, 100, '-n');
+$ITER % 2 == 0 or err("-n must be an even number");
 my $MINDP = check_int($opt{d}, 1, undef, '-m');
-my $SAMP = $opt{'s'} || 1.0;
-$SAMP > 0 && $SAMP <= 1 or err("-s $SAMP must be (0..1])");
+my $MINBQ = check_int($opt{'q'}, 0, 99);
+my $MINMQ = check_int($opt{'Q'}, 0, 60);
 
 #......................................
-msg("This is $EXE $VERSION");
+banner("This is $EXE $VERSION");
 check_tools(qw'pilon minimap2 samtools');
 
-#my $dir = tempdir();
-my $dir = './out'; run("mkdir -p $dir");
-msg("Work folder:", $dir);
+#rotate_contigs($IN, "rot1.fa");
+#rotate_contigs("rot1.fa", "rot2.fa");
+#exit(5);
 
-my $fa = fasta2hash($IN);
-hash2fasta("$dir/in.fa", $fa);
+my $CLEAN = $opt{k} ? 0 : 1;
+my $dir = tempdir(CLEANUP=>$CLEAN);
+msg("Workdirr:", $dir);
 
-for my $round (1 .. $MAXITER) {
+my $in = $IN;
+for my $round (1 .. $ITER) {
   banner("Correction round $round");
-  my $bam = "$dir/$round.bam";
-  bam("$dir/in.fa", $R1, $R2, $bam);
-  pilon("$dir/in.fa", $bam, "$dir/$round.fa");   
+  my $bam = "$dir/$round.short.bam";
+  bam($in, [ $R1, $R2 ], $bam);
+  my $pilon = "$dir/$round.pilon";
+  pilon($in, $bam, $pilon);
+  $in = "$pilon.fasta";
+  my $changes = changes("$dir/$round.pilon.changes");
+  my $out = "$dir/$round.plion.rorate.fasta";
+  rotate_contigs($in, $out);
+  $in = $out;
+  last if $changes == 0 and $round % 2 == 0;
 }
 
-msg("Done.");
+banner("FInalsing up");
+
+msg("Fixing FASTA IDs");
+my @ffn = slurp($in);
+for my $i (0 .. $#ffn) {
+  $ffn[$i] =~ s/(_pilon|_rotate)+$//;
+}
+my $OUT = $opt{'p'}.'.fna';
+spew($OUT, \@ffn);
+
+msg("Collating changes");
+my $CHA = $opt{'p'}.'.txt';
+run("cat $dir/*.pilon.changes > '$CHA'");
+msg("Kept output files in $dir") unless $CLEAN;
+msg("Result:\n* $OUT\n* $CHA");
+
+#......................................
+sub rotate_contigs {
+  my($fin, $fout) = @_;
+  my $in = fasta2hash($fin);
+  my %out;
+  msg("Rotating contigs");
+  for my $id (keys %$in) {
+    my $seq = $in->{$id};
+    my $D = int( length($seq) / 2 );
+    $seq = substr($seq,$D)
+         . substr($seq,0,$D);
+    length($seq)==length($in->{$id})
+      or err("Rotation of $id failed");
+    $out{"${id}_rotate"} = $seq;
+  } 
+  hash2fasta($fout, \%out);
+}
 
 #......................................
 sub bam {
-  my($ref, $r1, $r2, $bam) = @_;
-  run("samtools faidx '$ref'");
-  run("minimap2 -a -x sr -t $CPUS '$ref' '$r1' '$r2'" 
-     ." | samtools view -u -f 2 -"
-     ." | samtools sort -@ $CPUS"
+  my($ref, $reads, $bam) = @_;
+  my $opt = "-t $CPUS -a";
+  $opt .= (@$reads==1 ? ' -x map-ont' : ' -x sr');
+  $opt .= join('', map { " '$_'" } $ref, @$reads);
+  run("minimap2 $opt" 
+     ." | samtools sort -@ $CPUS -m 512M"
      ." > '$bam'");
   run("samtools index '$bam'");
   return;
@@ -65,13 +110,30 @@ sub bam {
 sub pilon {
   my($old, $bam, $new) = @_;
   run(
-    "_JAVA_OPTS=-Xmx8g pilon --threads $CPUS"
+    "_JAVA_OPTIONS=-Xmx8g pilon"
+   ." --threads $CPUS"
    ." --genome '$old' --frags '$bam'"
-   ." --output '$new' --changes --fix bases"
-   ." --minqual 13 --minmq 30 --mindepth $MINDP"
-   ." --nostrays" 
+   ." --output '$new' --changes"
+   ." --minqual $MINBQ --minmq $MINMQ --mindepth $MINDP"
+   ." --fix bases --nostrays" 
   );
   return;
+}
+
+#......................................
+sub changes {
+  my($fname) = @_;
+  my($ins,$del,$sub,$tot) = (0,0,0,0);
+  # NZ_LT598657:341666 NZ_LT598657_pilon:341666 . G
+  foreach (slurp($fname)) {
+    my($id,undef,$ref,$alt) = split ' ';
+    if ($ref eq '.') { $ins++; }
+    elsif ($alt eq '.') { $del++; }
+    else { $sub++; }
+    $tot++;
+  }
+  msg("Changes: $sub subs | $ins ins | $del del");
+  return $tot;
 }
 
 #......................................
@@ -91,14 +153,20 @@ sub usage {
     "OPTIONS\n",
     "  -h        Print this help\n",
     "  -V        Print version and exit\n",
-    "  -f FASTQ  R1 FASTQ fwd reads\n",
-    "  -r FASTQ  R2 FASTQ rev reads\n",
+    "  -j CPUS   NUmber of threads [$opt{j}]\n",
+    "INPUT/OUTPUT\n",
+    "  -p PREFIX Output prefix\n",
     "  -i FASTA  Input contigs\n",
-    "  -o FASTA  Output corrected contigs\n",
+    "  -f FASTQ  Illumina R1 FASTQ\n",
+    "  -r FASTQ  Illumina R2 FASTQ\n",
+    "  -l FASTQ  Nanopore long reads\n",
+    "  -k        Keep temporay files\n",
+    "PARAMTERS\n",
     "  -d INT    Minimum depth [$opt{d}]\n",
     "  -n INT    Maximum correction rounds [$opt{n}]\n",
-    "  -s FLOAT  Subsample reads for speed [$opt{s}]\n",
-    "  -j CPUS   NUmber of threads [$opt{j}]\n",
+    "  -q INT    Min base quality [$opt{q}]\n",
+    "  -Q INT    Min mapping qualoty [$opt{Q}]\n",
+#    "  -s FLOAT  Subsample reads for speed [$opt{s}]\n",
     "END\n";
   print 
   exit($ec);
@@ -208,7 +276,23 @@ sub hash2fasta {
 }
 
 #......................................
+sub slurp {
+  my($fname) = @_;
+  open my $IN, '<', $fname;
+  my @lines = <$IN>;
+  close $IN;
+  chomp @lines;
+  return @lines;
+}
 
+#......................................
+sub spew {
+  my($fname, $lines) = @_;
+  open my $OUT, '>', $fname;
+  print $OUT map { ($_,"\n") } @$lines;
+  close $OUT;
+  return;
+}
 
 #......................................
 
