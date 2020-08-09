@@ -149,7 +149,7 @@ sub usage {
     "SYNOPSIS\n",
     "  Correct assembly errors with Illumina reads\n",
     "USAGE\n",
-    "  $EXE [options] -f R1.fq -r R2.fq -i contigs.fa -o fixed.fa\n",
+    "  $EXE [options] -f R1.fq -r R2.fq -i contigs.fa -p outname\n",
     "OPTIONS\n",
     "  -h        Print this help\n",
     "  -V        Print version and exit\n",
@@ -165,7 +165,7 @@ sub usage {
     "  -d INT    Minimum depth [$opt{d}]\n",
     "  -n INT    Maximum correction rounds [$opt{n}]\n",
     "  -q INT    Min base quality [$opt{q}]\n",
-    "  -Q INT    Min mapping qualoty [$opt{Q}]\n",
+    "  -Q INT    Min mapping quality [$opt{Q}]\n",
 #    "  -s FLOAT  Subsample reads for speed [$opt{s}]\n",
     "END\n";
   print 
